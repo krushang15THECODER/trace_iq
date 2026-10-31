@@ -1,0 +1,35 @@
+{
+  "mappings": {
+    "dynamic": false,
+    "fields": {
+      "content": {
+        "type": "string",
+        "analyzer": "lucene.standard"
+      },
+      "sectionHeading": {
+        "type": "string",
+        "analyzer": "lucene.standard"
+      },
+      "sourceId": {
+        "type": "string",
+        "analyzer": "lucene.keyword"
+      },
+      "metadata": {
+        "type": "document",
+        "fields": {
+          "sourceType": {
+            "type": "string",
+            "analyzer": "lucene.keyword"
+          },
+          "service": {
+            "type": "string",
+            "analyzer": "lucene.keyword"
+          },
+          "isOutdated": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  }
+}
