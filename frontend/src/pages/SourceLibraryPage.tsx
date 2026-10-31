@@ -15,34 +15,50 @@ import {
   Calendar,
   Tag
 } from 'lucide-react';
-import { SourceDocument, SourceType } from '../types';
+import { SourceDocument, SourceType, ProjectRecord } from '../types';
 import { api } from '../api/client';
 
 interface SourceLibraryPageProps {
   sources: SourceDocument[];
   onRefresh: () => void;
   selectedSourceId?: string | null;
+  activeProjectId?: string | null;
+  projects?: ProjectRecord[];
+  onSelectProject?: (id: string) => void;
 }
 
 export const SourceLibraryPage: React.FC<SourceLibraryPageProps> = ({
   sources,
   onRefresh,
-  selectedSourceId
+  selectedSourceId,
+  activeProjectId,
+  projects = [],
+  onSelectProject
 }) => {
   const [activeTab, setActiveTab] = useState<'upload' | 'webpage' | 'note'>('upload');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [typeFilter, setTypeFilter] = useState<string>('all');
+  const [projectFilter, setProjectFilter] = useState<string>(activeProjectId || 'all');
   const [inspectSource, setInspectSource] = useState<SourceDocument | null>(
     sources.find((s) => s._id === selectedSourceId) || null
   );
 
+  // Sync projectFilter if activeProjectId prop changes
+  React.useEffect(() => {
+    if (activeProjectId) {
+      setProjectFilter(activeProjectId);
+      setSelectedUploadProjectId(activeProjectId);
+    }
+  }, [activeProjectId]);
+
   // Upload Form State
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState<string>('');
-  const [sourceType, setSourceType] = useState<SourceType>('incident_report');
+  const [sourceType, setSourceType] = useState<SourceType>('log');
   const [service, setService] = useState<string>('');
   const [incidentDate, setIncidentDate] = useState<string>('');
   const [isOutdated, setIsOutdated] = useState<boolean>(false);
+  const [selectedUploadProjectId, setSelectedUploadProjectId] = useState<string>(activeProjectId || '');
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<{ text: string; error?: boolean } | null>(null);
 
@@ -57,7 +73,33 @@ export const SourceLibraryPage: React.FC<SourceLibraryPageProps> = ({
 
   const handleFileUpload = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!file) return;
+    if (!file) {
+      setStatusMessage({ text: 'Please select a file to upload.', error: true });
+      return;
+    }
+
+    // Validation: empty file
+    if (file.size === 0) {
+      setStatusMessage({ text: 'File is empty (0 bytes). Please upload a valid document or log.', error: true });
+      return;
+    }
+
+    // Validation: file size
+    if (file.size > 10 * 1024 * 1024) {
+      setStatusMessage({ text: 'File size exceeds maximum allowed limit (10MB).', error: true });
+      return;
+    }
+
+    // Validation: file extension
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    const allowed = ['log', 'txt', 'pdf', 'json', 'md', 'csv'];
+    if (!ext || !allowed.includes(ext)) {
+      setStatusMessage({
+        text: `Invalid file format (.${ext || 'unknown'}). Supported formats are LOG, TXT, PDF, and JSON.`,
+        error: true
+      });
+      return;
+    }
 
     setIsSubmitting(true);
     setStatusMessage(null);
@@ -69,15 +111,17 @@ export const SourceLibraryPage: React.FC<SourceLibraryPageProps> = ({
     if (service) formData.append('service', service);
     if (incidentDate) formData.append('incidentDate', incidentDate);
     if (isOutdated) formData.append('isOutdated', 'true');
+    const projId = selectedUploadProjectId || activeProjectId;
+    if (projId) formData.append('projectId', projId);
 
     try {
       await api.uploadSource(formData);
-      setStatusMessage({ text: 'Source successfully ingested and indexed into MongoDB!' });
+      setStatusMessage({ text: `Source "${file.name}" ingested and indexed into MongoDB Vector Search!` });
       setFile(null);
       setTitle('');
       onRefresh();
     } catch (err: any) {
-      setStatusMessage({ text: err.message, error: true });
+      setStatusMessage({ text: err.message || 'Upload failed', error: true });
     } finally {
       setIsSubmitting(false);
     }
@@ -156,7 +200,8 @@ export const SourceLibraryPage: React.FC<SourceLibraryPageProps> = ({
       s.originalFilename.toLowerCase().includes(searchQuery.toLowerCase()) ||
       (s.metadata?.service || '').toLowerCase().includes(searchQuery.toLowerCase());
     const matchesType = typeFilter === 'all' || s.sourceType === typeFilter;
-    return matchesSearch && matchesType;
+    const matchesProject = projectFilter === 'all' || s.projectId === projectFilter;
+    return matchesSearch && matchesType && matchesProject;
   });
 
   return (
@@ -183,7 +228,7 @@ export const SourceLibraryPage: React.FC<SourceLibraryPageProps> = ({
             onClick={() => setActiveTab('upload')}
           >
             <Upload size={14} />
-            Upload File (PDF / TXT / MD / CSV / JSON)
+            Upload File (LOG · TXT · PDF · JSON)
           </button>
           <button
             className={`btn ${activeTab === 'webpage' ? 'btn-primary' : 'btn-secondary'}`}
@@ -227,7 +272,7 @@ export const SourceLibraryPage: React.FC<SourceLibraryPageProps> = ({
             <div className="grid-2">
               <div>
                 <label style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', textTransform: 'uppercase' }}>
-                  Select File
+                  Select File (LOG, TXT, PDF, JSON, MD, CSV • Max 10MB)
                 </label>
                 <input
                   type="file"
@@ -258,7 +303,27 @@ export const SourceLibraryPage: React.FC<SourceLibraryPageProps> = ({
               </div>
             </div>
 
-            <div className="grid-3">
+            <div style={{ display: 'grid', gridTemplateColumns: projects.length > 0 ? 'repeat(4, 1fr)' : 'repeat(3, 1fr)', gap: '14px' }}>
+              {projects.length > 0 && (
+                <div>
+                  <label style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', textTransform: 'uppercase' }}>
+                    Target Project
+                  </label>
+                  <select
+                    value={selectedUploadProjectId}
+                    onChange={(e) => setSelectedUploadProjectId(e.target.value)}
+                    style={{ marginTop: '4px' }}
+                  >
+                    <option value="">-- No Specific Project (Global) --</option>
+                    {projects.map((p) => (
+                      <option key={p._id} value={p._id}>
+                        📁 {p.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
               <div>
                 <label style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', textTransform: 'uppercase' }}>
                   Source Category
@@ -305,6 +370,7 @@ export const SourceLibraryPage: React.FC<SourceLibraryPageProps> = ({
                 />
               </div>
             </div>
+
 
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <input
@@ -425,8 +491,8 @@ export const SourceLibraryPage: React.FC<SourceLibraryPageProps> = ({
       </div>
 
       {/* Filter and Search Bar */}
-      <div style={{ display: 'flex', gap: '12px', marginBottom: '16px', alignItems: 'center' }}>
-        <div style={{ flex: 1, position: 'relative' }}>
+      <div style={{ display: 'flex', gap: '12px', marginBottom: '16px', alignItems: 'center', flexWrap: 'wrap' }}>
+        <div style={{ flex: 1, minWidth: '240px', position: 'relative' }}>
           <input
             type="text"
             placeholder="Search documents by title, filename or service..."
@@ -434,10 +500,24 @@ export const SourceLibraryPage: React.FC<SourceLibraryPageProps> = ({
             onChange={(e) => setSearchQuery(e.target.value)}
           />
         </div>
+        {projects.length > 0 && (
+          <select
+            value={projectFilter}
+            onChange={(e) => setProjectFilter(e.target.value)}
+            style={{ width: '210px' }}
+          >
+            <option value="all">All Projects ({sources.length})</option>
+            {projects.map((p) => (
+              <option key={p._id} value={p._id}>
+                📁 {p.name}
+              </option>
+            ))}
+          </select>
+        )}
         <select
           value={typeFilter}
           onChange={(e) => setTypeFilter(e.target.value)}
-          style={{ width: '200px' }}
+          style={{ width: '190px' }}
         >
           <option value="all">All Source Categories</option>
           <option value="incident_report">Incident Reports</option>
@@ -457,6 +537,7 @@ export const SourceLibraryPage: React.FC<SourceLibraryPageProps> = ({
             <tr>
               <th>Document Title</th>
               <th>Category</th>
+              {projects.length > 0 && <th>Project</th>}
               <th>Version</th>
               <th>Chunks</th>
               <th>Status</th>
@@ -467,49 +548,75 @@ export const SourceLibraryPage: React.FC<SourceLibraryPageProps> = ({
           <tbody>
             {filteredSources.length === 0 ? (
               <tr>
-                <td colSpan={7} style={{ textAlign: 'center', padding: '30px', color: 'var(--text-muted)' }}>
+                <td colSpan={projects.length > 0 ? 8 : 7} style={{ textAlign: 'center', padding: '30px', color: 'var(--text-muted)' }}>
                   No sources match your filter criteria.
                 </td>
               </tr>
             ) : (
-              filteredSources.map((s) => (
-                <tr key={s._id}>
-                  <td>
-                    <div style={{ fontWeight: 600 }}>{s.title}</div>
-                    <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-                      {s.originalFilename}
-                    </div>
-                  </td>
-                  <td>
-                    <span className="badge" style={{ backgroundColor: 'var(--bg-surface-secondary)' }}>
-                      {s.sourceType.replace('_', ' ')}
-                    </span>
-                  </td>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>
-                    v{s.documentVersion}
-                    {s.metadata?.isOutdated && (
-                      <span className="badge badge-outdated" style={{ marginLeft: '4px' }}>
-                        Outdated
+              filteredSources.map((s) => {
+                const assignedProject = projects.find((p) => p._id === s.projectId);
+                return (
+                  <tr key={s._id}>
+                    <td>
+                      <div style={{ fontWeight: 600 }}>{s.title}</div>
+                      <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                        {s.originalFilename}
+                      </div>
+                    </td>
+                    <td>
+                      <span className="badge" style={{ backgroundColor: 'var(--bg-surface-secondary)' }}>
+                        {s.sourceType.replace('_', ' ')}
                       </span>
+                    </td>
+                    {projects.length > 0 && (
+                      <td style={{ fontSize: '12px' }}>
+                        {assignedProject ? (
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', color: 'var(--accent-forest)', fontWeight: 500 }}>
+                            📁 {assignedProject.name}
+                          </span>
+                        ) : (
+                          <span style={{ color: 'var(--text-muted)' }}>Global</span>
+                        )}
+                      </td>
                     )}
-                  </td>
-                  <td style={{ fontFamily: 'var(--font-mono)' }}>{s.metadata?.chunkCount || 0}</td>
-                  <td>
-                    <span
-                      className={`badge ${
-                        s.ingestionStatus === 'indexed'
-                          ? 'badge-supported'
-                          : s.ingestionStatus === 'failed'
-                          ? 'badge-contradicted'
-                          : 'badge-plausible'
-                      }`}
-                    >
-                      {s.ingestionStatus}
-                    </span>
-                  </td>
-                  <td style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                    {s.metadata?.service || 'N/A'}
-                  </td>
+                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>
+                      v{s.documentVersion}
+                      {s.metadata?.isOutdated && (
+                        <span className="badge badge-outdated" style={{ marginLeft: '4px' }}>
+                          Outdated
+                        </span>
+                      )}
+                    </td>
+                    <td style={{ fontFamily: 'var(--font-mono)' }}>{s.metadata?.chunkCount || 0}</td>
+                    <td>
+                      {s.ingestionStatus === 'indexed' && (
+                        <span className="badge badge-supported" style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                          <CheckCircle size={11} /> Indexed
+                        </span>
+                      )}
+                      {s.ingestionStatus === 'processing' && (
+                        <span className="badge badge-plausible" style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                          <RefreshCw size={11} className="spin-animation" /> Processing
+                        </span>
+                      )}
+                      {s.ingestionStatus === 'pending' && (
+                        <span className="badge badge-weak" style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                          Pending
+                        </span>
+                      )}
+                      {s.ingestionStatus === 'failed' && (
+                        <span
+                          className="badge badge-contradicted"
+                          style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', cursor: 'help' }}
+                          title={s.errorMessage || 'Ingestion failed'}
+                        >
+                          <AlertCircle size={11} /> Failed
+                        </span>
+                      )}
+                    </td>
+                    <td style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                      {s.metadata?.service || 'N/A'}
+                    </td>
                   <td style={{ textAlign: 'right' }}>
                     <div style={{ display: 'inline-flex', gap: '6px' }}>
                       <button
@@ -539,9 +646,11 @@ export const SourceLibraryPage: React.FC<SourceLibraryPageProps> = ({
                     </div>
                   </td>
                 </tr>
-              ))
-            )}
+              );
+            })
+          )}
           </tbody>
+
         </table>
       </div>
 

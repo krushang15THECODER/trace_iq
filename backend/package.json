@@ -15,9 +15,11 @@
     "test:scenario": "tsx test/e2e-scenario.test.ts",
     "test:temporal": "tsx test/temporal-evidence.test.ts",
     "test:provider": "tsx test/provider-transition.test.ts",
+    "test:gemini": "tsx src/scripts/test-gemini-live.ts",
     "test:openai": "tsx src/scripts/test-openai-live.ts"
   },
   "dependencies": {
+    "@google/genai": "^2.32.0",
     "axios": "^1.7.9",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",

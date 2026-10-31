@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import axios, { AxiosError } from 'axios';
 import { z } from 'zod';
+import { GoogleGenAI, Type } from '@google/genai';
 import { getCollections } from '../db/mongo.js';
 import { env } from '../config/env.js';
 import {
@@ -14,7 +15,7 @@ import {
 } from '../types/index.js';
 import { RetrievalService, RetrievalOptions } from './retrieval.js';
 
-export const OpenAIInvestigationOutputSchema = z.object({
+export const InvestigationOutputSchema = z.object({
   executiveSummary: z.string().min(1),
   observations: z.array(
     z.object({
@@ -52,16 +53,19 @@ export const OpenAIInvestigationOutputSchema = z.object({
   }).optional()
 });
 
-export type RawInvestigationSynthesis = z.infer<typeof OpenAIInvestigationOutputSchema>;
+export const OpenAIInvestigationOutputSchema = InvestigationOutputSchema;
+export type RawInvestigationSynthesis = z.infer<typeof InvestigationOutputSchema>;
 
 export interface RunInvestigationParams {
   question: string;
   incidentId?: string;
+  projectId?: string;
+  userId?: string;
   sourceFilters?: string[];
   serviceFilter?: string;
   timeFilter?: string;
   topK?: number;
-  llmProvider?: 'openai' | 'rule_grounded';
+  llmProvider?: 'gemini' | 'openai' | 'rule_grounded';
 }
 
 export class InvestigationEngine {
@@ -76,6 +80,8 @@ export class InvestigationEngine {
     const retrievalOptions: RetrievalOptions = {
       topK: params.topK || 12,
       filter: {
+        projectId: params.projectId,
+        userId: params.userId,
         sourceType: params.sourceFilters as any,
         service: params.serviceFilter,
         incidentDate: params.timeFilter
@@ -91,11 +97,18 @@ export class InvestigationEngine {
     const sourceMap = new Map<string, SourceDocument>();
     sourceDocs.forEach((s) => sourceMap.set(s._id, s));
 
-    // Step B & C & D: Synthesize report using configured engine (OpenAI or Rule-Grounded Engine)
+    // Step B & C & D: Synthesize report using configured engine (Gemini, OpenAI, or Rule-Grounded Engine)
     let rawSynthesis: RawInvestigationSynthesis;
     const activeLlmProvider = params.llmProvider || env.LLM_PROVIDER;
 
-    if (activeLlmProvider === 'openai') {
+    if (activeLlmProvider === 'gemini') {
+      if (!env.GEMINI_API_KEY) {
+        throw new Error(
+          "LLM_PROVIDER is configured as 'gemini', but GEMINI_API_KEY is not set. Configure GEMINI_API_KEY in your environment, or set LLM_PROVIDER=rule_grounded."
+        );
+      }
+      rawSynthesis = await this.synthesizeWithGemini(params.question, retrievedChunks, sourceMap);
+    } else if (activeLlmProvider === 'openai') {
       if (!env.OPENAI_API_KEY) {
         throw new Error(
           "LLM_PROVIDER is configured as 'openai', but OPENAI_API_KEY is not set. Configure OPENAI_API_KEY in your environment, or set LLM_PROVIDER=rule_grounded."
@@ -214,6 +227,8 @@ export class InvestigationEngine {
       _id: reportId,
       question: params.question,
       incidentId: params.incidentId,
+      projectId: params.projectId,
+      userId: params.userId,
       executiveSummary: rawSynthesis.executiveSummary,
       hypotheses,
       observations,
@@ -239,6 +254,185 @@ export class InvestigationEngine {
     console.log(`📋 Investigation generated & saved: ${reportId} (${report.investigationStatus})`);
 
     return report;
+  }
+
+  /**
+   * Synthesize investigation using Google Gemini structured JSON mode with strict Zod schema validation
+   */
+  static async synthesizeWithGemini(
+    question: string,
+    chunks: RetrievedChunk[],
+    sourceMap: Map<string, SourceDocument>
+  ): Promise<RawInvestigationSynthesis> {
+    if (!env.GEMINI_API_KEY) {
+      throw new Error('GEMINI_API_KEY is not configured for Gemini LLM provider.');
+    }
+
+    const ai = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
+
+    const chunkContext = chunks.map((c) => {
+      const src = sourceMap.get(c.sourceId);
+      return {
+        chunkId: c._id,
+        sourceId: c.sourceId,
+        sourceTitle: c.metadata?.sourceTitle || src?.title,
+        sourceType: c.metadata?.sourceType || src?.sourceType,
+        isOutdated: Boolean(c.metadata?.isOutdated || src?.metadata?.isOutdated),
+        timestamps: c.timestamps,
+        section: c.sectionHeading,
+        content: c.content
+      };
+    });
+
+    const systemInstruction = `You are TraceIQ, an expert evidence-based engineering incident investigator.
+Your goal is to investigate technical problems by analyzing strictly retrieved evidence.
+RULES:
+1. You must ONLY cite chunk IDs from the provided evidence list. Do NOT invent chunk IDs.
+2. Distinguish:
+   - Observed facts / Direct measurements
+   - Source-reported claims
+   - Inferences
+   - Unknowns
+3. Never present a plausible cause as a proven root cause without sufficient evidence.
+4. You must use ONLY these controlled assessment labels for hypotheses:
+   "Supported", "Plausible", "Weakly supported", "Contradicted", "Insufficient evidence".
+   Do NOT use percentages or mathematical probabilities.
+5. Watch out for outdated documents (marked isOutdated: true or older timestamps). If a source is outdated, clearly indicate that or mark hypotheses relying on it as Contradicted or Weakly supported.
+6. If the question cannot be answered from the retrieved evidence (e.g. asking for metrics that are completely absent), you MUST abstain! Set abstention.isAbstained to true, state what is known, what is missing, and what data to upload.
+7. Return JSON strictly matching the specified schema.`;
+
+    const userPrompt = `USER QUESTION: "${question}"
+
+AVAILABLE RETRIEVED EVIDENCE CHUNKS:
+${JSON.stringify(chunkContext, null, 2)}`;
+
+    const geminiSchema = {
+      type: Type.OBJECT,
+      properties: {
+        executiveSummary: { type: Type.STRING },
+        observations: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              type: {
+                type: Type.STRING,
+                enum: ['direct_measurement', 'source_statement', 'inference', 'unknown']
+              },
+              statement: { type: Type.STRING },
+              chunkIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+              confidenceLevel: {
+                type: Type.STRING,
+                enum: ['high', 'moderate', 'low']
+              }
+            },
+            required: ['type', 'statement']
+          }
+        },
+        hypotheses: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              hypothesisId: { type: Type.STRING },
+              description: { type: Type.STRING },
+              assessment: {
+                type: Type.STRING,
+                enum: ['Supported', 'Plausible', 'Weakly supported', 'Contradicted', 'Insufficient evidence']
+              },
+              assessmentReason: { type: Type.STRING },
+              supportingChunkIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+              contradictingChunkIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+              missingEvidence: { type: Type.ARRAY, items: { type: Type.STRING } },
+              diagnosticTests: { type: Type.ARRAY, items: { type: Type.STRING } }
+            },
+            required: ['hypothesisId', 'description', 'assessment', 'assessmentReason']
+          }
+        },
+        missingEvidence: { type: Type.ARRAY, items: { type: Type.STRING } },
+        recommendedChecks: { type: Type.ARRAY, items: { type: Type.STRING } },
+        abstention: {
+          type: Type.OBJECT,
+          properties: {
+            isAbstained: { type: Type.BOOLEAN },
+            reason: { type: Type.STRING },
+            missingRequiredData: { type: Type.ARRAY, items: { type: Type.STRING } },
+            suggestedTelemetry: { type: Type.ARRAY, items: { type: Type.STRING } }
+          },
+          required: ['isAbstained']
+        }
+      },
+      required: ['executiveSummary', 'hypotheses']
+    };
+
+    const maxRetries = 2;
+    let attempt = 0;
+    let delayMs = 1500;
+    let currentModel = env.LLM_MODEL || 'gemini-3.5-flash';
+
+    while (attempt <= maxRetries) {
+      try {
+        const response = await ai.models.generateContent({
+          model: currentModel,
+          contents: [
+            {
+              role: 'user',
+              parts: [{ text: `${systemInstruction}\n\n${userPrompt}` }]
+            }
+          ],
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: geminiSchema,
+            temperature: 0.1
+          }
+        });
+
+        const content = response.text;
+        if (!content) {
+          throw new Error('Received empty response content from Gemini generateContent.');
+        }
+
+        let parsed: any;
+        try {
+          parsed = JSON.parse(content);
+        } catch (jsonErr: any) {
+          throw new Error(`Failed to parse Gemini JSON response: ${jsonErr.message}`);
+        }
+
+        const validation = InvestigationOutputSchema.safeParse(parsed);
+        if (!validation.success) {
+          console.error('Gemini response validation errors:', validation.error.format());
+          throw new Error(
+            `Gemini output failed schema validation: ${validation.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join(', ')}`
+          );
+        }
+
+        return validation.data;
+      } catch (err: any) {
+        attempt++;
+        const errMsg = err.message || String(err);
+        const isRateLimit = errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED');
+        const isUnavailable = errMsg.includes('503') || errMsg.includes('UNAVAILABLE') || errMsg.includes('high demand');
+
+        if (isUnavailable && currentModel !== 'gemini-3.5-flash') {
+          console.warn(`⚠️ Model ${currentModel} unavailable (503). Switching to gemini-3.5-flash fallback...`);
+          currentModel = 'gemini-3.5-flash';
+        }
+
+        if ((isRateLimit || isUnavailable) && attempt <= maxRetries) {
+          console.warn(
+            `⚠️ Gemini generateContent failed (attempt ${attempt}/${maxRetries}). Retrying in ${delayMs}ms...`
+          );
+          await new Promise((r) => setTimeout(r, delayMs));
+          delayMs *= 2;
+          continue;
+        }
+
+        throw new Error(`Gemini Investigation API error: ${errMsg}`);
+      }
+    }
+
+    throw new Error('Gemini Chat Completion max retries exceeded.');
   }
 
   /**

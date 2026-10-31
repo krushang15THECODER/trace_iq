@@ -10,10 +10,16 @@ async function runReEmbedScript() {
 
   try {
     const provider = getEmbeddingProvider();
+    const isGemini = provider.name.includes('gemini');
     const isRealOpenAI = provider.name === 'text-embedding-3-small';
+    const executionMode = isGemini
+      ? '🌐 Google Gemini Embeddings API'
+      : isRealOpenAI
+      ? '🌐 Real OpenAI Embeddings API'
+      : '🧪 Deterministic Local Projections';
 
     console.log(`Target Embedding Provider: ${provider.name} (${provider.dimensions} dimensions)`);
-    console.log(`Execution Mode: ${isRealOpenAI ? '🌐 Real OpenAI Embeddings API' : '🧪 Deterministic Local Projections'}`);
+    console.log(`Execution Mode: ${executionMode}`);
     console.log(`Resumable Mode: ${isForce ? 'DISABLED (--force passed)' : 'ENABLED (skipping already up-to-date sources)'}`);
 
     const result = await IngestionService.reembedAllSources(provider, {

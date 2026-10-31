@@ -21,6 +21,8 @@ export interface IngestionInput {
   content: string | Buffer;
   sourceUrl?: string;
   documentVersion?: string;
+  projectId?: string;
+  userId?: string;
   metadata?: Record<string, any>;
   isOutdated?: boolean;
 }
@@ -97,6 +99,8 @@ export class IngestionService {
       originalContent: rawBuffer.toString('utf-8').slice(0, 50000), // Preview limit for large files
       sourceUrl: input.sourceUrl,
       documentVersion: version,
+      projectId: input.projectId,
+      userId: input.userId,
       createdAt: existing ? existing.createdAt : now,
       updatedAt: now,
       contentHash,
@@ -141,6 +145,8 @@ export class IngestionService {
         return {
           _id: `chk_${uuidv4().slice(0, 16)}`,
           sourceId,
+          projectId: input.projectId,
+          userId: input.userId,
           chunkIndex: rc.chunkIndex,
           content: rc.content,
           embedding: emb,

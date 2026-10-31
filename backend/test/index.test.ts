@@ -1,7 +1,11 @@
 import assert from 'assert';
 import { isPrivateIp } from '../src/utils/ssrfValidator.js';
 import { chunkMarkdownAndText, chunkCsv, chunkJson } from '../src/services/chunker.js';
-import { getEmbeddingProvider, DeterministicLocalEmbeddingProvider } from '../src/services/embedding.js';
+import {
+  getEmbeddingProvider,
+  DeterministicLocalEmbeddingProvider,
+  GeminiEmbeddingProvider
+} from '../src/services/embedding.js';
 
 async function runUnitTests() {
   console.log('🧪 Running TraceIQ Core Unit & Logic Tests...\n');
@@ -42,6 +46,13 @@ async function runUnitTests() {
   const norm = Math.sqrt(vector.reduce((sum, val) => sum + val * val, 0));
   assert.ok(Math.abs(norm - 1.0) < 1e-3, 'Vector must be unit normalized');
   console.log(`   ✅ Generated vector has dimension ${vector.length} and unit norm ${norm.toFixed(4)}.\n`);
+
+  // Test 5: Gemini Embedding Provider Invariants
+  console.log('5. Testing Gemini Embedding Provider configuration invariants:');
+  const gemini = new GeminiEmbeddingProvider('dummy-key-for-unit-test-spec', 'gemini-embedding-2', 1536);
+  assert.strictEqual(gemini.dimensions, 1536, 'Gemini vector dimensions must be 1536');
+  assert.strictEqual(gemini.name, 'gemini-embedding-2', 'Gemini model name must match');
+  console.log('   ✅ Gemini Embedding Provider correctly configured for 1536-dimensional Vector Search.\n');
 
   console.log('🎉 ALL UNIT TESTS PASSED SUCCESSFULLY!\n');
 }

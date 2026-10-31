@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Sparkles,
   Search,
@@ -14,13 +14,18 @@ import {
   ShieldAlert,
   ChevronRight,
   ExternalLink,
-  Download
+  Download,
+  History,
+  RotateCcw,
+  Folder,
+  RefreshCw
 } from 'lucide-react';
 import {
   IncidentRecord,
   InvestigationReport,
   Citation,
-  HypothesisAssessment
+  HypothesisAssessment,
+  ProjectRecord
 } from '../types';
 import { api } from '../api/client';
 import { CitationDrawer } from '../components/CitationDrawer';
@@ -28,6 +33,9 @@ import { CitationDrawer } from '../components/CitationDrawer';
 interface InvestigationPageProps {
   incidents: IncidentRecord[];
   onNavigateToSource: (sourceId: string) => void;
+  activeProjectId?: string | null;
+  projects?: ProjectRecord[];
+  onSelectProject?: (id: string) => void;
 }
 
 const PRESET_QUERIES = [
@@ -51,7 +59,10 @@ const PRESET_QUERIES = [
 
 export const InvestigationPage: React.FC<InvestigationPageProps> = ({
   incidents,
-  onNavigateToSource
+  onNavigateToSource,
+  activeProjectId,
+  projects = [],
+  onSelectProject
 }) => {
   const [selectedIncidentId, setSelectedIncidentId] = useState<string>(
     incidents[0]?._id || 'INC-2024-0882'
@@ -64,31 +75,70 @@ export const InvestigationPage: React.FC<InvestigationPageProps> = ({
   const [topK, setTopK] = useState<number>(12);
 
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [loadingStep, setLoadingStep] = useState<number>(1);
   const [report, setReport] = useState<InvestigationReport | null>(null);
   const [selectedCitation, setSelectedCitation] = useState<Citation | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Investigation History State
+  const [history, setHistory] = useState<InvestigationReport[]>([]);
+  const [showHistory, setShowHistory] = useState<boolean>(false);
+  const [loadingHistory, setLoadingHistory] = useState<boolean>(false);
+
+  const activeProject = projects.find((p) => p._id === activeProjectId);
+
+  const loadHistory = async () => {
+    try {
+      setLoadingHistory(true);
+      const list = await api.getInvestigations(activeProjectId || undefined);
+      setHistory(list);
+    } catch (e: any) {
+      console.warn('Could not load history:', e.message);
+    } finally {
+      setLoadingHistory(false);
+    }
+  };
+
+  useEffect(() => {
+    loadHistory();
+  }, [activeProjectId]);
 
   const handleRunInvestigation = async (queryText?: string) => {
     const q = queryText || question;
     if (!q.trim()) return;
 
     setIsLoading(true);
+    setLoadingStep(1);
     setError(null);
+
+    // Progress stepper simulation while Gemini + RAG are computing
+    const stepInterval = setInterval(() => {
+      setLoadingStep((prev) => (prev < 3 ? prev + 1 : prev));
+    }, 1800);
 
     try {
       const result = await api.runInvestigation({
         question: q,
+        projectId: activeProjectId || undefined,
         incidentId: selectedIncidentId || undefined,
         sourceFilters: selectedSourceTypes.length > 0 ? selectedSourceTypes : undefined,
         timeFilter: timeFilter || undefined,
         topK
       });
       setReport(result);
+      loadHistory();
     } catch (err: any) {
       setError(err.message || 'Failed to complete investigation');
     } finally {
+      clearInterval(stepInterval);
       setIsLoading(false);
     }
+  };
+
+  const handleSelectHistoryItem = (item: InvestigationReport) => {
+    setReport(item);
+    setQuestion(item.question);
+    setError(null);
   };
 
   const toggleSourceType = (type: string) => {
@@ -119,25 +169,135 @@ export const InvestigationPage: React.FC<InvestigationPageProps> = ({
     <div>
       <div className="page-header">
         <div>
-          <h1 className="page-title">Incident Investigation Workspace</h1>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+            <h1 className="page-title" style={{ margin: 0 }}>Incident Investigation Workspace</h1>
+            {activeProject && (
+              <span className="badge badge-supported" style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                <Folder size={12} /> {activeProject.name}
+              </span>
+            )}
+          </div>
           <p className="page-subtitle">
             Formulate incident queries, retrieve multi-source evidence, evaluate hypotheses, and audit citations.
           </p>
         </div>
-        {report && (
-          <a
-            href={`/api/investigations/${report._id}/export`}
-            download
-            className="btn btn-secondary"
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <button
+            className={`btn ${showHistory ? 'btn-primary' : 'btn-secondary'}`}
+            onClick={() => setShowHistory(!showHistory)}
           >
-            <Download size={14} />
-            Export Markdown Report
-          </a>
-        )}
+            <History size={14} />
+            History ({history.length})
+          </button>
+          {report && (
+            <>
+              <button
+                className="btn btn-secondary"
+                onClick={() => setReport(null)}
+                title="Clear current report and start fresh query"
+              >
+                <RotateCcw size={14} />
+                New Query
+              </button>
+              <a
+                href={`/api/investigations/${report._id}/export`}
+                download
+                className="btn btn-secondary"
+              >
+                <Download size={14} />
+                Export Markdown
+              </a>
+            </>
+          )}
+        </div>
       </div>
+
+      {/* Investigation History Drawer / Accordion */}
+      {showHistory && (
+        <div className="card" style={{ marginBottom: '24px', backgroundColor: 'var(--bg-surface-secondary)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600 }}>
+              <History size={16} />
+              <span>Project Investigation History {activeProject ? `for "${activeProject.name}"` : '(All Projects)'}</span>
+            </div>
+            <button
+              className="btn btn-secondary"
+              style={{ fontSize: '11px', padding: '3px 8px' }}
+              onClick={loadHistory}
+            >
+              <RefreshCw size={12} className={loadingHistory ? 'spin-animation' : ''} />
+              Refresh
+            </button>
+          </div>
+
+          {history.length === 0 ? (
+            <div style={{ padding: '16px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '13px' }}>
+              No previous investigations saved for this project yet. Run a query below to start building history.
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '280px', overflowY: 'auto' }}>
+              {history.map((h) => (
+                <div
+                  key={h._id}
+                  style={{
+                    padding: '10px 14px',
+                    borderRadius: 'var(--radius-sm)',
+                    backgroundColor: report?._id === h._id ? 'var(--accent-forest-subtle)' : 'var(--bg-surface)',
+                    border: '1px solid',
+                    borderColor: report?._id === h._id ? 'var(--accent-forest)' : 'var(--border-light)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '12px',
+                    cursor: 'pointer'
+                  }}
+                  onClick={() => handleSelectHistoryItem(h)}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, fontSize: '13px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {h.question}
+                    </div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-muted)', display: 'flex', gap: '12px', marginTop: '3px' }}>
+                      <span>{new Date(h.createdAt).toLocaleString()}</span>
+                      <span>{h.citations.length} Citations</span>
+                      <span>{h.hypotheses.length} Hypotheses</span>
+                      <span>{h.executionTimeMs}ms</span>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span
+                      className={`badge ${
+                        h.investigationStatus === 'completed'
+                          ? 'badge-supported'
+                          : h.investigationStatus === 'abstained'
+                          ? 'badge-weak'
+                          : 'badge-insufficient'
+                      }`}
+                      style={{ fontSize: '11px' }}
+                    >
+                      {h.investigationStatus}
+                    </span>
+                    <button
+                      className="btn btn-secondary"
+                      style={{ fontSize: '11px', padding: '3px 8px' }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleSelectHistoryItem(h);
+                      }}
+                    >
+                      Reopen
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Query Formulation Card */}
       <div className="card" style={{ marginBottom: '24px' }}>
+
         <div style={{ display: 'flex', gap: '16px', marginBottom: '14px', flexWrap: 'wrap' }}>
           <div style={{ flex: '1', minWidth: '240px' }}>
             <label style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', textTransform: 'uppercase' }}>
@@ -272,28 +432,117 @@ export const InvestigationPage: React.FC<InvestigationPageProps> = ({
           backgroundColor: 'var(--accent-terracotta-subtle)',
           border: '1px solid rgba(163, 72, 53, 0.3)',
           borderRadius: 'var(--radius-md)',
-          padding: '14px 18px',
+          padding: '16px 20px',
           marginBottom: '24px',
           display: 'flex',
-          alignItems: 'center',
-          gap: '10px',
+          alignItems: 'flex-start',
+          justifyContent: 'space-between',
+          gap: '14px',
           color: 'var(--accent-terracotta)'
         }}>
-          <AlertTriangle size={18} />
-          <div>{error}</div>
+          <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
+            <AlertTriangle size={20} style={{ flexShrink: 0, marginTop: '2px' }} />
+            <div>
+              <div style={{ fontWeight: 600, fontSize: '14px', marginBottom: '4px' }}>
+                {error.includes('429') || error.toLowerCase().includes('rate') || error.toLowerCase().includes('quota')
+                  ? 'Gemini API Rate Limit / Quota Exceeded'
+                  : 'Investigation Engine Error'}
+              </div>
+              <div style={{ fontSize: '13px', lineHeight: '1.5' }}>
+                {error.includes('429') || error.toLowerCase().includes('rate')
+                  ? 'The Gemini service is temporarily throttled or experiencing rate limits. Please wait 10 seconds and retry.'
+                  : error}
+              </div>
+            </div>
+          </div>
+          <button
+            className="btn btn-secondary"
+            style={{ fontSize: '12px', whiteSpace: 'nowrap', backgroundColor: '#fff' }}
+            onClick={() => handleRunInvestigation()}
+          >
+            <RefreshCw size={12} />
+            Retry Query
+          </button>
         </div>
       )}
 
-      {/* Investigation Loading Spinner */}
+      {/* Step-by-Step Investigation Loading Stepper */}
       {isLoading && (
-        <div className="card" style={{ textAlign: 'center', padding: '60px 20px', marginBottom: '24px' }}>
-          <Activity size={32} color="var(--accent-forest)" style={{ margin: '0 auto 16px' }} />
-          <h3 style={{ fontSize: '18px' }}>Executing Evidence Investigation Engine...</h3>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginTop: '6px' }}>
-            Executing MongoDB Vector Search & Lexical Query → Fusing with RRF → Extracting Observations → Evaluating Hypotheses
-          </p>
+        <div className="card" style={{ padding: '36px 28px', marginBottom: '24px' }}>
+          <div style={{ textAlign: 'center', marginBottom: '24px' }}>
+            <Activity size={32} color="var(--accent-forest)" className="spin-animation" style={{ margin: '0 auto 12px' }} />
+            <h3 style={{ fontSize: '18px', margin: 0 }}>Executing Evidence Investigation Engine...</h3>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginTop: '6px' }}>
+              Synthesizing multi-source logs, runbooks, metrics, and temporal facts with strict citation grounding
+            </p>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px', maxWidth: '850px', margin: '0 auto' }}>
+            <div style={{
+              padding: '14px',
+              borderRadius: 'var(--radius-sm)',
+              border: '1px solid',
+              borderColor: loadingStep >= 1 ? 'var(--accent-forest)' : 'var(--border-light)',
+              backgroundColor: loadingStep >= 1 ? 'var(--accent-forest-subtle)' : 'var(--bg-surface-secondary)'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                {loadingStep > 1 ? (
+                  <CheckCircle size={16} color="var(--accent-forest)" />
+                ) : (
+                  <Activity size={16} color="var(--accent-forest)" className="spin-animation" />
+                )}
+                <strong style={{ fontSize: '12.5px' }}>1. Hybrid Retrieval</strong>
+              </div>
+              <p style={{ fontSize: '11.5px', color: 'var(--text-muted)', margin: 0 }}>
+                Querying project vectors (1536-dim) & Atlas text scoring with RRF fusion.
+              </p>
+            </div>
+
+            <div style={{
+              padding: '14px',
+              borderRadius: 'var(--radius-sm)',
+              border: '1px solid',
+              borderColor: loadingStep >= 2 ? 'var(--accent-forest)' : 'var(--border-light)',
+              backgroundColor: loadingStep >= 2 ? 'var(--accent-forest-subtle)' : 'var(--bg-surface-secondary)'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                {loadingStep > 2 ? (
+                  <CheckCircle size={16} color="var(--accent-forest)" />
+                ) : loadingStep === 2 ? (
+                  <Activity size={16} color="var(--accent-forest)" className="spin-animation" />
+                ) : (
+                  <Clock size={16} color="var(--text-muted)" />
+                )}
+                <strong style={{ fontSize: '12.5px' }}>2. Temporal Filtering</strong>
+              </div>
+              <p style={{ fontSize: '11.5px', color: 'var(--text-muted)', margin: 0 }}>
+                Verifying chunk provenance, timestamps, and detecting superseded documents.
+              </p>
+            </div>
+
+            <div style={{
+              padding: '14px',
+              borderRadius: 'var(--radius-sm)',
+              border: '1px solid',
+              borderColor: loadingStep >= 3 ? 'var(--accent-forest)' : 'var(--border-light)',
+              backgroundColor: loadingStep >= 3 ? 'var(--accent-forest-subtle)' : 'var(--bg-surface-secondary)'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                {loadingStep === 3 ? (
+                  <Activity size={16} color="var(--accent-forest)" className="spin-animation" />
+                ) : (
+                  <Clock size={16} color="var(--text-muted)" />
+                )}
+                <strong style={{ fontSize: '12.5px' }}>3. Gemini Synthesis</strong>
+              </div>
+              <p style={{ fontSize: '11.5px', color: 'var(--text-muted)', margin: 0 }}>
+                Reasoning across competing hypotheses with verified citation IDs.
+              </p>
+            </div>
+          </div>
         </div>
       )}
+
 
       {/* Investigation Results */}
       {report && !isLoading && (

@@ -21,11 +21,12 @@ const envSchema = z.object({
   MONGODB_URI: z.string().default('mongodb://localhost:27017/traceiq'),
   DB_NAME: z.string().default('traceiq'),
   OPENAI_API_KEY: z.string().optional(),
-  EMBEDDING_PROVIDER: z.enum(['openai', 'mock']).default('mock'),
-  EMBEDDING_MODEL: z.string().default('text-embedding-3-small'),
+  GEMINI_API_KEY: z.string().optional(),
+  EMBEDDING_PROVIDER: z.enum(['gemini', 'openai', 'mock']).default('gemini'),
+  EMBEDDING_MODEL: z.string().default('gemini-embedding-2'),
   EMBEDDING_DIMENSIONS: z.coerce.number().default(1536),
-  LLM_PROVIDER: z.enum(['openai', 'rule_grounded']).default('rule_grounded'),
-  LLM_MODEL: z.string().default('gpt-4o-mini'),
+  LLM_PROVIDER: z.enum(['gemini', 'openai', 'rule_grounded']).default('gemini'),
+  LLM_MODEL: z.string().default('gemini-3.5-flash'),
   VECTOR_INDEX_NAME: z.string().default('vector_index'),
   SEARCH_INDEX_NAME: z.string().default('search_index'),
   CORS_ORIGIN: z.string().default('*')
@@ -40,8 +41,14 @@ if (!parsed.success) {
 
 const rawEnv = parsed.data;
 
-// In production, enforce that if OpenAI provider is chosen, the API key must be supplied.
+// In production, enforce that required API keys are supplied based on chosen provider.
 if (rawEnv.NODE_ENV === 'production') {
+  if (rawEnv.EMBEDDING_PROVIDER === 'gemini' && !rawEnv.GEMINI_API_KEY) {
+    throw new Error('Production error: EMBEDDING_PROVIDER=gemini requires GEMINI_API_KEY to be set.');
+  }
+  if (rawEnv.LLM_PROVIDER === 'gemini' && !rawEnv.GEMINI_API_KEY) {
+    throw new Error('Production error: LLM_PROVIDER=gemini requires GEMINI_API_KEY to be set.');
+  }
   if (rawEnv.EMBEDDING_PROVIDER === 'openai' && !rawEnv.OPENAI_API_KEY) {
     throw new Error('Production error: EMBEDDING_PROVIDER=openai requires OPENAI_API_KEY to be set.');
   }

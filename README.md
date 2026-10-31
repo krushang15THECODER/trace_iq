@@ -25,7 +25,7 @@ TraceIQ is an **investigation assistant**, not an autonomous production remediat
 - **Frontend**: React 18, Vite, TypeScript, Vanilla CSS with an editorial design aesthetic (Ivory background, Charcoal typography, Forest Green & Terracotta accents, thin borders, high readability).
 - **Backend**: Node.js, Express, TypeScript, Zod environment & payload validation.
 - **Database & Retrieval**: MongoDB Atlas, MongoDB Atlas Vector Search (`$vectorSearch`), MongoDB Atlas Search (`$search`), Reciprocal Rank Fusion (RRF).
-- **AI & Grounding**: Modular embedding providers (OpenAI `text-embedding-3-small` / deterministic unit-normalized local projections) & structured LLM generation with server-side citation validation.
+- **AI & Grounding**: Google Gemini unified stack via `@google/genai` (Embeddings: `gemini-embedding-2` @ 1,536 dimensions; LLM: `gemini-3.5-flash`), with optional OpenAI / deterministic local fallback providers & strict server-side citation validation.
 - **Deployment**: Vercel-compatible frontend, Render-compatible backend.
 
 ---
@@ -120,11 +120,16 @@ Create `.env` inside `backend/` (or copy from `.env.example`):
 cp .env.example backend/.env
 ```
 
-Set your MongoDB Atlas URI:
+Set your MongoDB Atlas URI and Google Gemini API key:
 ```env
 MONGODB_URI=mongodb+srv://<user>:<password>@cluster.mongodb.net/traceiq?retryWrites=true&w=majority
 DB_NAME=traceiq
-OPENAI_API_KEY=your_openai_key_here  # Optional: falls back to deterministic local provider
+GEMINI_API_KEY=your_gemini_api_key_here
+EMBEDDING_PROVIDER=gemini
+EMBEDDING_MODEL=gemini-embedding-2
+EMBEDDING_DIMENSIONS=1536
+LLM_PROVIDER=gemini
+LLM_MODEL=gemini-3.5-flash
 ```
 
 ### 2. Install Dependencies

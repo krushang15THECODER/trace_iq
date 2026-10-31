@@ -1,5 +1,6 @@
 import axios, { AxiosError } from 'axios';
 import crypto from 'crypto';
+import { GoogleGenAI } from '@google/genai';
 import { env } from '../config/env.js';
 
 export interface EmbeddingProvider {
@@ -7,6 +8,129 @@ export interface EmbeddingProvider {
   dimensions: number;
   generateEmbedding(text: string): Promise<number[]>;
   generateEmbeddings(texts: string[]): Promise<number[][]>;
+}
+
+/**
+ * Production Google Gemini Embedding Provider (defaults to gemini-embedding-2, 1536 dimensions)
+ * Features:
+ * - Configurable outputDimensionality (1536 dimensions matching MongoDB Vector Search index)
+ * - Exponential backoff retry on 429 (Rate Limits) and 503 / 5xx transient server errors
+ * - Controlled concurrency batch processing
+ * - Strict vector dimension validation
+ * - L2 unit normalization check
+ * - Detailed error diagnostics without leaking secrets
+ */
+export class GeminiEmbeddingProvider implements EmbeddingProvider {
+  name: string = env.EMBEDDING_MODEL || 'gemini-embedding-2';
+  dimensions: number = env.EMBEDDING_DIMENSIONS || 1536;
+  private apiKey: string;
+  private ai: GoogleGenAI;
+  private maxRetries: number = 3;
+
+  constructor(apiKey?: string, modelName?: string, dimensions?: number) {
+    this.apiKey = apiKey || env.GEMINI_API_KEY || '';
+    if (!this.apiKey) {
+      throw new Error(
+        'Gemini Embedding Provider initialization failed: GEMINI_API_KEY is not configured.'
+      );
+    }
+    if (modelName) this.name = modelName;
+    if (dimensions) this.dimensions = dimensions;
+    this.ai = new GoogleGenAI({ apiKey: this.apiKey });
+  }
+
+  async generateEmbedding(text: string): Promise<number[]> {
+    const res = await this.generateEmbeddings([text]);
+    return res[0];
+  }
+
+  async generateEmbeddings(texts: string[]): Promise<number[][]> {
+    if (!this.apiKey) {
+      throw new Error(
+        'GEMINI_API_KEY is required for Gemini embeddings. Verify your environment variables.'
+      );
+    }
+
+    if (!texts || texts.length === 0) {
+      return [];
+    }
+
+    const sanitized = texts.map((t) => (t && t.trim().length > 0 ? t.trim() : ' '));
+
+    // Concurrency-limited execution (max 5 parallel embedding requests at a time)
+    const concurrency = 5;
+    const results: number[][] = new Array(sanitized.length);
+
+    for (let i = 0; i < sanitized.length; i += concurrency) {
+      const slice = sanitized.slice(i, i + concurrency);
+      const batchPromises = slice.map((text, idx) =>
+        this.embedWithRetry(text).then((vec) => {
+          results[i + idx] = vec;
+        })
+      );
+      await Promise.all(batchPromises);
+    }
+
+    return results;
+  }
+
+  private async embedWithRetry(text: string): Promise<number[]> {
+    let attempt = 0;
+    let delayMs = 1000;
+
+    while (attempt <= this.maxRetries) {
+      try {
+        const response = await this.ai.models.embedContent({
+          model: this.name,
+          contents: text,
+          config: {
+            outputDimensionality: this.dimensions
+          }
+        });
+
+        const vec = response.embeddings?.[0]?.values;
+        if (!Array.isArray(vec)) {
+          throw new Error('Gemini API response did not contain an embedding array.');
+        }
+
+        if (vec.length !== this.dimensions) {
+          throw new Error(
+            `Gemini embedding dimension mismatch: expected ${this.dimensions}, got ${vec.length} for model ${this.name}.`
+          );
+        }
+
+        // Verify and ensure unit normalization
+        let normSq = 0;
+        for (let i = 0; i < vec.length; i++) {
+          normSq += vec[i] * vec[i];
+        }
+        const norm = Math.sqrt(normSq);
+        if (norm > 0 && Math.abs(norm - 1.0) > 1e-2) {
+          return vec.map((v) => v / norm);
+        }
+
+        return vec;
+      } catch (err: any) {
+        attempt++;
+        const errMsg = err.message || String(err);
+        const isRateLimit = errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED');
+        const isTransient = errMsg.includes('503') || errMsg.includes('UNAVAILABLE') || errMsg.includes('500');
+
+        if ((isRateLimit || isTransient) && attempt <= this.maxRetries) {
+          console.warn(
+            `⚠️ Gemini Embeddings API request failed (attempt ${attempt}/${this.maxRetries}). Retrying in ${delayMs}ms...`
+          );
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+          delayMs *= 2;
+          continue;
+        }
+
+        throw new Error(`Gemini Embeddings API error: ${errMsg}`);
+      }
+    }
+
+    throw new Error('Gemini Embeddings max retries exceeded.');
+  }
 }
 
 /**
@@ -137,7 +261,7 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
 }
 
 /**
- * Deterministic semantic-hash embedding provider for local/testing without OpenAI API key.
+ * Deterministic semantic-hash embedding provider for local/testing without external API keys.
  * Generates unit-normalized 1536-dimensional vectors using SHA-256 token bucket projections.
  * This ensures exact vector dimension matching and repeatable similarity.
  */
@@ -192,7 +316,14 @@ let activeProvider: EmbeddingProvider | null = null;
 export function getEmbeddingProvider(): EmbeddingProvider {
   if (activeProvider) return activeProvider;
 
-  if (env.EMBEDDING_PROVIDER === 'openai') {
+  if (env.EMBEDDING_PROVIDER === 'gemini') {
+    if (!env.GEMINI_API_KEY) {
+      throw new Error(
+        "EMBEDDING_PROVIDER is set to 'gemini', but GEMINI_API_KEY is missing. Configure GEMINI_API_KEY in your environment, or set EMBEDDING_PROVIDER=mock."
+      );
+    }
+    activeProvider = new GeminiEmbeddingProvider();
+  } else if (env.EMBEDDING_PROVIDER === 'openai') {
     if (!env.OPENAI_API_KEY) {
       throw new Error(
         "EMBEDDING_PROVIDER is set to 'openai', but OPENAI_API_KEY is missing. Configure OPENAI_API_KEY in your environment, or set EMBEDDING_PROVIDER=mock."

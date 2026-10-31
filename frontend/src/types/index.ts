@@ -12,6 +12,25 @@ export type SourceType =
 
 export type IngestionStatus = 'pending' | 'processing' | 'indexed' | 'failed';
 
+export interface UserRecord {
+  _id: string;
+  email: string;
+  name: string;
+  token?: string;
+  createdAt: string;
+}
+
+export interface ProjectRecord {
+  _id: string;
+  name: string;
+  description: string;
+  userId: string;
+  createdAt: string;
+  updatedAt: string;
+  documentCount?: number;
+  investigationCount?: number;
+}
+
 export interface SourceDocument {
   _id: string;
   title: string;
@@ -20,6 +39,8 @@ export interface SourceDocument {
   originalContent: string;
   sourceUrl?: string;
   documentVersion: string;
+  projectId?: string;
+  userId?: string;
   createdAt: string;
   updatedAt: string;
   contentHash: string;
@@ -42,6 +63,8 @@ export interface SourceDocument {
 export interface ChunkDocument {
   _id: string;
   sourceId: string;
+  projectId?: string;
+  userId?: string;
   chunkIndex: number;
   content: string;
   embeddingModel: string;
@@ -125,6 +148,8 @@ export interface InvestigationReport {
   _id: string;
   question: string;
   incidentId?: string;
+  projectId?: string;
+  userId?: string;
   executiveSummary: string;
   hypotheses: Hypothesis[];
   observations: Observation[];

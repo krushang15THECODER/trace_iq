@@ -9,6 +9,8 @@ export interface RetrievalFilter {
   incidentDate?: string;
   excludeOutdated?: boolean;
   sourceId?: string;
+  projectId?: string;
+  userId?: string;
 }
 
 export interface RetrievalOptions {
@@ -144,6 +146,12 @@ export class RetrievalService {
     if (filter.sourceId) {
       mongoFilter.sourceId = filter.sourceId;
     }
+    if (filter.projectId) {
+      mongoFilter.projectId = filter.projectId;
+    }
+    if (filter.userId) {
+      mongoFilter.userId = filter.userId;
+    }
 
     if (isAtlas) {
       // Atlas $vectorSearch Aggregation Pipeline
@@ -201,7 +209,7 @@ export class RetrievalService {
 
     // Local / Non-Atlas environment (or Atlas sync window fallback):
     // Execute MongoDB filter query matching active model to prevent mixed embedding vectors
-    const modelFilter = {
+    const modelFilter: any = {
       ...mongoFilter,
       embeddingModel: embeddingProvider.name,
       embeddingDimensions: embeddingProvider.dimensions
@@ -250,6 +258,12 @@ export class RetrievalService {
     }
     if (filter.sourceId) {
       mongoFilter.sourceId = filter.sourceId;
+    }
+    if (filter.projectId) {
+      mongoFilter.projectId = filter.projectId;
+    }
+    if (filter.userId) {
+      mongoFilter.userId = filter.userId;
     }
 
     if (isAtlas) {

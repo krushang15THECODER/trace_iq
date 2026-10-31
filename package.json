@@ -9,6 +9,7 @@
     "seed": "npm --prefix backend run seed",
     "re-embed": "npm --prefix backend run re-embed",
     "eval": "npm --prefix backend run eval",
+    "test:gemini": "npm --prefix backend run test:gemini",
     "backend:dev": "npm --prefix backend run dev",
     "frontend:dev": "npm --prefix frontend run dev"
   }

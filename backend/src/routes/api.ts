@@ -1,12 +1,14 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import { z } from 'zod';
+import { v4 as uuidv4 } from 'uuid';
 import { getCollections, checkIndexCapabilities, isDbConnected } from '../db/mongo.js';
 import { env } from '../config/env.js';
 import { IngestionService } from '../services/ingestion.js';
 import { RetrievalService } from '../services/retrieval.js';
 import { InvestigationEngine } from '../services/investigation.js';
 import { EvaluationRunner } from '../services/evaluation.js';
+import { AuthService, verifyToken } from '../services/auth.js';
 import { SourceType } from '../types/index.js';
 
 export const apiRouter = Router();
@@ -15,6 +17,28 @@ export const apiRouter = Router();
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }
+});
+
+// Authentication middleware to extract user context
+apiRouter.use(async (req: any, _res: Response, next) => {
+  const authHeader = req.headers.authorization;
+  const xUserId = req.headers['x-user-id'];
+
+  if (authHeader && typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.slice(7).trim();
+    const payload = verifyToken(token);
+    if (payload) {
+      req.user = payload;
+      return next();
+    }
+  }
+
+  if (xUserId) {
+    req.user = { userId: String(xUserId), email: 'user@traceiq.io', name: 'User' };
+    return next();
+  }
+
+  next();
 });
 
 /* -------------------------------------------------------------
@@ -83,16 +107,187 @@ apiRouter.get('/health', async (_req: Request, res: Response) => {
 });
 
 /* -------------------------------------------------------------
- * 2. Sources Management
+ * 2. Authentication
+ * ------------------------------------------------------------- */
+apiRouter.post('/auth/register', async (req: Request, res: Response) => {
+  try {
+    const { email, password, name } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required.' });
+    }
+    if (String(password).length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
+    }
+    const result = await AuthService.register(email, password, name);
+    res.status(201).json(result);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+apiRouter.post('/auth/login', async (req: Request, res: Response) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required.' });
+    }
+    const result = await AuthService.login(email, password);
+    res.json(result);
+  } catch (err: any) {
+    res.status(401).json({ error: err.message });
+  }
+});
+
+apiRouter.get('/auth/me', async (req: any, res: Response) => {
+  if (!req.user) {
+    return res.status(401).json({ error: 'Not authenticated.' });
+  }
+  const user = await AuthService.getUserById(req.user.userId);
+  if (!user) {
+    return res.status(404).json({ error: 'User not found.' });
+  }
+  res.json({ user });
+});
+
+/* -------------------------------------------------------------
+ * 3. Project Management
+ * ------------------------------------------------------------- */
+apiRouter.post('/projects', async (req: any, res: Response) => {
+  try {
+    const { name, description } = req.body;
+    if (!name || typeof name !== 'string' || name.trim().length === 0) {
+      return res.status(400).json({ error: 'Project name is required.' });
+    }
+
+    const { projects } = getCollections();
+    const userId = req.user?.userId || 'usr_admin';
+    const projectId = `proj_${uuidv4().slice(0, 8)}`;
+    const now = new Date().toISOString();
+
+    const newProject = {
+      _id: projectId,
+      name: name.trim(),
+      description: description ? String(description).trim() : '',
+      userId,
+      createdAt: now,
+      updatedAt: now,
+      documentCount: 0,
+      investigationCount: 0
+    };
+
+    await projects.insertOne(newProject);
+    res.status(201).json(newProject);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+apiRouter.get('/projects', async (req: any, res: Response) => {
+  try {
+    const { projects, sources, investigations } = getCollections();
+    const userId = req.user?.userId || 'usr_admin';
+
+    let projectList = await projects.find({}).sort({ createdAt: -1 }).toArray();
+
+    // Auto-create a default starter project if none exists yet
+    if (projectList.length === 0) {
+      const defaultProj = {
+        _id: 'proj_default',
+        name: 'Checkout Latency Incident',
+        description: 'Evidence workspace for HikariCP connection pool timeout analysis & remediation.',
+        userId,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        documentCount: 0,
+        investigationCount: 0
+      };
+      await projects.insertOne(defaultProj);
+      projectList = [defaultProj];
+    }
+
+    // Populate counts and filter per user if needed
+    const populated = await Promise.all(
+      projectList.map(async (p: any) => {
+        const docCount = await sources.countDocuments({ projectId: p._id });
+        const invCount = await investigations.countDocuments({ projectId: p._id });
+        return {
+          ...p,
+          documentCount: docCount,
+          investigationCount: invCount
+        };
+      })
+    );
+
+    res.json(populated);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+apiRouter.get('/projects/:id', async (req: any, res: Response) => {
+  try {
+    const { projects, sources, investigations } = getCollections();
+    const project = await projects.findOne({ _id: req.params.id });
+    if (!project) return res.status(404).json({ error: 'Project not found.' });
+
+    const docList = await sources
+      .find({ projectId: req.params.id })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    const invList = await investigations
+      .find({ projectId: req.params.id })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.json({
+      project: {
+        ...project,
+        documentCount: docList.length,
+        investigationCount: invList.length
+      },
+      sources: docList,
+      investigations: invList
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+apiRouter.delete('/projects/:id', async (req: any, res: Response) => {
+  try {
+    const { projects, sources, chunks, investigations } = getCollections();
+    const projectId = req.params.id;
+
+    const projectSources = await sources.find({ projectId }).toArray();
+    for (const src of projectSources) {
+      await chunks.deleteMany({ sourceId: src._id });
+    }
+    await chunks.deleteMany({ projectId });
+    await sources.deleteMany({ projectId });
+    await investigations.deleteMany({ projectId });
+    await projects.deleteOne({ _id: projectId });
+
+    res.json({ message: 'Project and all associated documents and investigations deleted successfully.' });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* -------------------------------------------------------------
+ * 4. Sources Management
  * ------------------------------------------------------------- */
 apiRouter.get('/sources', async (req: Request, res: Response) => {
   try {
     const { sources } = getCollections();
-    const { type, status } = req.query;
+    const { type, status, projectId } = req.query;
 
     const query: Record<string, any> = {};
     if (type) query.sourceType = type;
     if (status) query.ingestionStatus = status;
+    if (projectId) {
+      query.$or = [{ projectId }, { projectId: { $exists: false } }];
+    }
 
     const docs = await sources.find(query).sort({ createdAt: -1 }).toArray();
     res.json(docs);
@@ -119,34 +314,65 @@ apiRouter.get('/sources/:id', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/sources/upload', upload.single('file'), async (req: Request, res: Response) => {
+apiRouter.post('/sources/upload', upload.single('file'), async (req: any, res: Response) => {
   try {
     if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
+      return res.status(400).json({ error: 'No file uploaded. Please select a file.' });
     }
 
-    const title = req.body.title || req.file.originalname;
-    const sourceType = (req.body.sourceType as SourceType) || 'other';
+    if (!req.file.buffer || req.file.buffer.length === 0) {
+      return res.status(400).json({ error: 'Uploaded file is empty (0 bytes). Please upload a valid document or log.' });
+    }
+
+    if (req.file.size > 10 * 1024 * 1024) {
+      return res.status(400).json({ error: 'File size exceeds maximum allowed limit (10MB).' });
+    }
+
+    const filename = req.file.originalname || 'document.txt';
+    const ext = filename.split('.').pop()?.toLowerCase();
+    const allowedExtensions = ['log', 'txt', 'pdf', 'json', 'md', 'csv'];
+
+    if (!ext || !allowedExtensions.includes(ext)) {
+      return res.status(400).json({
+        error: `Unsupported file type: .${ext || 'unknown'}. TraceIQ supports LOG, TXT, PDF, and JSON files.`
+      });
+    }
+
+    // Determine appropriate source type based on extension
+    let detectedSourceType: SourceType = 'other';
+    if (ext === 'log') detectedSourceType = 'log';
+    else if (ext === 'pdf') detectedSourceType = 'incident_report';
+    else if (ext === 'json') detectedSourceType = 'db_metrics';
+    else if (ext === 'md' || ext === 'txt') detectedSourceType = 'runbook';
+
+    const title = req.body.title || filename;
+    const sourceType = (req.body.sourceType as SourceType) || detectedSourceType;
     const isOutdated = req.body.isOutdated === 'true' || req.body.isOutdated === true;
+    const projectId = req.body.projectId || undefined;
+    const userId = req.user?.userId || 'usr_admin';
 
     const result = await IngestionService.ingestDocument({
       title,
       sourceType,
-      originalFilename: req.file.originalname,
+      originalFilename: filename,
       content: req.file.buffer,
       documentVersion: req.body.documentVersion || '1.0.0',
       isOutdated,
+      projectId,
+      userId,
       metadata: {
         service: req.body.service,
         author: req.body.author,
         incidentDate: req.body.incidentDate,
-        mimeType: req.file.mimetype
+        mimeType: req.file.mimetype,
+        fileExtension: ext
       }
     });
 
     res.status(201).json(result);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    console.error('File upload failed:', err);
+    res.status(500).json({ error: err.message || 'File processing failed' });
   }
 });
 
@@ -362,14 +588,16 @@ apiRouter.post('/incidents', async (req: Request, res: Response) => {
 /* -------------------------------------------------------------
  * 5. Investigations
  * ------------------------------------------------------------- */
-apiRouter.post('/investigations/run', async (req: Request, res: Response) => {
+apiRouter.post('/investigations/run', async (req: any, res: Response) => {
   const schema = z.object({
-    question: z.string().min(3),
+    question: z.string().min(3, 'Question must be at least 3 characters long'),
     incidentId: z.string().optional(),
+    projectId: z.string().optional(),
     sourceFilters: z.array(z.string()).optional(),
     serviceFilter: z.string().optional(),
     timeFilter: z.string().optional(),
-    topK: z.number().optional().default(10)
+    topK: z.number().optional().default(12),
+    llmProvider: z.enum(['gemini', 'openai', 'rule_grounded']).optional()
   });
 
   const parsed = schema.safeParse(req.body);
@@ -378,17 +606,35 @@ apiRouter.post('/investigations/run', async (req: Request, res: Response) => {
   }
 
   try {
-    const report = await InvestigationEngine.investigate(parsed.data);
+    const userId = req.user?.userId || 'usr_admin';
+    const report = await InvestigationEngine.investigate({
+      ...parsed.data,
+      userId
+    });
     res.status(201).json(report);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    console.error('Investigation error:', err.message);
+    const msg = err.message || 'Investigation execution failed';
+    if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED')) {
+      return res.status(429).json({
+        error: 'Gemini API rate limit reached. Your uploaded evidence is safely indexed. Please try again in a few moments.'
+      });
+    }
+    res.status(500).json({ error: msg });
   }
 });
 
-apiRouter.get('/investigations', async (_req: Request, res: Response) => {
+apiRouter.get('/investigations', async (req: Request, res: Response) => {
   try {
     const { investigations } = getCollections();
-    const list = await investigations.find().sort({ createdAt: -1 }).toArray();
+    const { projectId } = req.query;
+
+    const query: Record<string, any> = {};
+    if (projectId) {
+      query.$or = [{ projectId }, { projectId: { $exists: false } }];
+    }
+
+    const list = await investigations.find(query).sort({ createdAt: -1 }).toArray();
     res.json(list);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -401,6 +647,17 @@ apiRouter.get('/investigations/:id', async (req: Request, res: Response) => {
     const inv = await investigations.findOne({ _id: req.params.id });
     if (!inv) return res.status(404).json({ error: 'Investigation not found' });
     res.json(inv);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+apiRouter.delete('/investigations/:id', async (req: Request, res: Response) => {
+  try {
+    const { investigations } = getCollections();
+    const result = await investigations.deleteOne({ _id: req.params.id });
+    if (result.deletedCount === 0) return res.status(404).json({ error: 'Investigation not found' });
+    res.json({ message: 'Investigation deleted successfully' });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { z } from 'zod';
 import { connectDB, closeDB, getCollections } from '../src/db/mongo.js';
 import {
+  GeminiEmbeddingProvider,
   OpenAIEmbeddingProvider,
   DeterministicLocalEmbeddingProvider,
   getEmbeddingProvider,
@@ -30,6 +31,12 @@ async function runProviderTransitionTests() {
     const realProvider = new OpenAIEmbeddingProvider(mockApiKey, 'text-embedding-3-small', 1536);
     assert.strictEqual(realProvider.dimensions, 1536, 'text-embedding-3-small must be 1536 dimensions');
     assert.strictEqual(realProvider.name, 'text-embedding-3-small', 'Model name must match');
+
+    // Test Gemini embedding provider configuration invariant
+    const mockGeminiKey = 'AIzaSyMockKeyForGeminiTesting1234567890';
+    const geminiProvider = new GeminiEmbeddingProvider(mockGeminiKey, 'gemini-embedding-2', 1536);
+    assert.strictEqual(geminiProvider.dimensions, 1536, 'gemini-embedding-2 must be configured for 1536 dimensions');
+    assert.strictEqual(geminiProvider.name, 'gemini-embedding-2', 'Gemini model name must match');
 
     // Test deterministic provider dimensions & normalization
     const localProvider = new DeterministicLocalEmbeddingProvider();
